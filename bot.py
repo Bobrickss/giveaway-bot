@@ -5,13 +5,13 @@ import json
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramBadRequest
 
-from config import BOT_TOKEN, WEBAPP_URL
+from config import BOT_TOKEN
 from database import db
 
 logging.basicConfig(level=logging.INFO)
@@ -87,11 +87,15 @@ def admin_kb(giveaway_id):
     ])
 
 
-def captcha_webapp_kb(giveaway_id, answer):
-    url = f"{WEBAPP_URL}/captcha.html?g={giveaway_id}&a={answer}"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🤖 Подтвердить, что я человек", web_app=WebAppInfo(url=url))]
-    ])
+def captcha_inline_kb(giveaway_id, answer):
+    """Генерирует inline-капчу прямо в боте — выбери нужный эмодзи из 5."""
+    pool = random.sample(CAPTCHA_EMOJIS, 5)
+    if answer not in pool:
+        pool[random.randint(0, 4)] = answer
+    random.shuffle(pool)
+    buttons = [InlineKeyboardButton(text=e, callback_data=f"captcha_{giveaway_id}_{answer}_{e}") for e in pool]
+    # Раскладываем 5 кнопок в ряд
+    return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
 
 # /start /help
@@ -105,7 +109,7 @@ async def cmd_start(message: types.Message):
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     await message.answer(
-        "📖 <b>Как создать розыгрыш:</b>\n\n1. /new → фото, название, описание\n2. Выбери текст и цвет кнопки\n3. Добавь каналы для обязательной подписки\n4. Укажи победителей и дату\n5. Опубликуй\n\nУчастники проходят капчу прямо внутри Telegram.",
+        "📖 <b>Как создать розыгрыш:</b>\n\n1. /new → фото, название, описание\n2. Выбери текст и цвет кнопки\n3. Добавь каналы для обязательной подписки\n4. Укажи победителей и дату\n5. Опубликуй\n\nУчастники проходят проверку прямо в чате с ботом.",
         parse_mode="HTML"
     )
 
@@ -303,7 +307,7 @@ async def cb_publish(callback: types.CallbackQuery):
     await callback.answer("✅ Опубликовано!")
 
 
-# Участие — показываем WebApp капчу
+# Участие — показываем inline-капчу прямо в боте
 @dp.callback_query(F.data.startswith("join_"))
 async def cb_join(callback: types.CallbackQuery):
     gid = callback.data.split("_",1)[1]
@@ -313,41 +317,64 @@ async def cb_join(callback: types.CallbackQuery):
     user = callback.from_user
     if db.is_participant(gid, user.id):
         await callback.answer("✅ Ты уже участвуешь!", show_alert=True); return
+
     answer = random.choice(CAPTCHA_EMOJIS)
     db.set_captcha(user.id, gid, answer)
+
     await callback.message.answer(
-        "🤖 <b>Проверка на человечность</b>\n\nНажми кнопку — окно откроется прямо в Telegram:",
-        reply_markup=captcha_webapp_kb(gid, answer), parse_mode="HTML"
+        f"🤖 <b>Проверка на человечность</b>\n\nНайди и нажми: {answer}",
+        reply_markup=captcha_inline_kb(gid, answer),
+        parse_mode="HTML"
     )
     await callback.answer()
 
 
-# Результат из WebApp
-@dp.message(F.web_app_data)
-async def web_app_result(message: types.Message):
-    try:
-        data = json.loads(message.web_app_data.data)
-    except Exception:
-        return
-    if not data.get("passed"):
-        await message.answer("❌ Капча не пройдена."); return
-    gid = data.get("giveaway_id")
-    if not gid: return
-    user = message.from_user
+# Обработка нажатия на кнопку капчи
+@dp.callback_query(F.data.startswith("captcha_"))
+async def cb_captcha(callback: types.CallbackQuery):
+    # формат: captcha_{gid}_{answer}_{chosen}
+    parts = callback.data.split("_", 3)
+    gid = parts[1]
+    answer = parts[2]
+    chosen = parts[3]
+
+    user = callback.from_user
     g = db.get_giveaway(gid)
     if not g or g["status"] != "active":
-        await message.answer("❌ Розыгрыш завершён."); return
+        await callback.answer("❌ Розыгрыш завершён.", show_alert=True); return
     if db.is_participant(gid, user.id):
-        await message.answer("✅ Ты уже участвуешь!"); return
+        await callback.answer("✅ Ты уже участвуешь!", show_alert=True)
+        try: await callback.message.delete()
+        except: pass
+        return
+
+    if chosen != answer:
+        # Неверно — обновляем капчу с новым набором эмодзи
+        db.set_captcha(user.id, gid, answer)
+        await callback.answer("❌ Неверно, попробуй ещё раз!")
+        try:
+            await callback.message.edit_reply_markup(reply_markup=captcha_inline_kb(gid, answer))
+        except: pass
+        return
+
+    # Верно — проверяем подписки
     db.clear_captcha(user.id, gid)
     tg_channels = g.get("tg_channels", [])
     not_subbed = [ch for ch in tg_channels if not await check_tg_sub(user.id, ch)]
+
+    try: await callback.message.delete()
+    except: pass
+
     if not_subbed:
         btns = [[InlineKeyboardButton(text=f"📢 {ch}", url=f"https://t.me/{ch.lstrip('@')}")] for ch in not_subbed]
         btns.append([InlineKeyboardButton(text="✅ Я подписался — проверить", callback_data=f"checksub_{gid}")])
-        await message.answer("⚠️ <b>Подпишись на каналы:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
+        await callback.message.answer("⚠️ <b>Подпишись на каналы:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="HTML")
+        await callback.answer()
         return
-    await do_register(message, user, gid, g)
+
+    await callback.answer("✅ Проверка пройдена!")
+    await do_register(callback.message, user, gid, g)
+
 
 @dp.callback_query(F.data.startswith("checksub_"))
 async def cb_checksub(callback: types.CallbackQuery):
@@ -389,7 +416,7 @@ async def do_register(message, user, gid, g):
         pass
 
 
-# Список участников — ТОЛЬКО для создателя, с никами и ссылками
+# Список участников
 @dp.callback_query(F.data.startswith("adminlist_"))
 async def cb_adminlist(callback: types.CallbackQuery):
     gid = callback.data.split("_",1)[1]
@@ -516,7 +543,7 @@ async def cb_cancelok(callback: types.CallbackQuery):
 
 
 async def main():
-    logger.info("Бот запущен v3")
+    logger.info("Бот запущен v4 (inline captcha)")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
