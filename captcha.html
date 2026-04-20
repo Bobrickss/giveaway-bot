@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Проверка</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--tg-theme-bg-color, #f0f0f0);
+    color: var(--tg-theme-text-color, #000);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+
+  .card {
+    background: var(--tg-theme-secondary-bg-color, #fff);
+    border-radius: 16px;
+    padding: 32px 24px;
+    width: 100%;
+    max-width: 340px;
+    text-align: center;
+    box-shadow: 0 2px 16px rgba(0,0,0,0.08);
+  }
+
+  .robot-icon {
+    font-size: 64px;
+    margin-bottom: 8px;
+    display: block;
+  }
+
+  .shadow-icon {
+    font-size: 20px;
+    opacity: 0.3;
+    margin-bottom: 20px;
+    display: block;
+  }
+
+  .title {
+    font-size: 17px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--tg-theme-text-color, #000);
+  }
+
+  .subtitle {
+    font-size: 14px;
+    color: var(--tg-theme-hint-color, #888);
+    margin-bottom: 28px;
+  }
+
+  .emoji-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+
+  .emoji-btn {
+    background: var(--tg-theme-bg-color, #f5f5f5);
+    border: 2px solid transparent;
+    border-radius: 12px;
+    padding: 14px 8px;
+    font-size: 32px;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .emoji-btn:active {
+    transform: scale(0.93);
+  }
+
+  .emoji-btn.correct {
+    border-color: #4CAF50;
+    background: #e8f5e9;
+    animation: pulse 0.3s ease;
+  }
+
+  .emoji-btn.wrong {
+    border-color: #f44336;
+    background: #ffebee;
+    animation: shake 0.3s ease;
+  }
+
+  @keyframes pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.1); }
+    100% { transform: scale(1); }
+  }
+
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-6px); }
+    75% { transform: translateX(6px); }
+  }
+
+  .target-box {
+    background: var(--tg-theme-button-color, #2196F3);
+    color: var(--tg-theme-button-text-color, #fff);
+    border-radius: 12px;
+    padding: 12px 20px;
+    font-size: 15px;
+    font-weight: 500;
+    margin-bottom: 20px;
+  }
+
+  .target-emoji {
+    font-size: 28px;
+    display: block;
+    margin-bottom: 4px;
+  }
+
+  .error-msg {
+    color: #f44336;
+    font-size: 13px;
+    margin-top: 8px;
+    min-height: 20px;
+  }
+
+  .success-screen {
+    display: none;
+  }
+
+  .success-screen.show {
+    display: block;
+  }
+
+  .captcha-screen.hide {
+    display: none;
+  }
+
+  .checkmark {
+    font-size: 72px;
+    margin-bottom: 16px;
+    display: block;
+  }
+
+  .success-title {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    color: #4CAF50;
+  }
+
+  .success-sub {
+    font-size: 14px;
+    color: var(--tg-theme-hint-color, #888);
+  }
+</style>
+</head>
+<body>
+
+<div class="card">
+
+  <!-- Капча -->
+  <div class="captcha-screen" id="captchaScreen">
+    <span class="robot-icon">🤖</span>
+    <span class="shadow-icon">◼</span>
+    <div class="title">Проверка на человечность</div>
+    <div class="subtitle">Нажми на правильный эмодзи</div>
+
+    <div class="target-box">
+      <span class="target-emoji" id="targetEmoji"></span>
+      <span id="targetLabel">Найди этот эмодзи</span>
+    </div>
+
+    <div class="emoji-grid" id="emojiGrid"></div>
+    <div class="error-msg" id="errorMsg"></div>
+  </div>
+
+  <!-- Успех -->
+  <div class="success-screen" id="successScreen">
+    <span class="checkmark">✅</span>
+    <div class="success-title">Готово!</div>
+    <div class="success-sub">Ты подтверждён как человек.<br>Регистрируем участие...</div>
+  </div>
+
+</div>
+
+<script>
+  const tg = window.Telegram.WebApp;
+  tg.ready();
+  tg.expand();
+
+  const EMOJIS = ["🐶","🐱","🐭","🐹","🐰","🦊","🐻","🐼","🐨","🐯","🦁","🐮","🐷","🐸","🐵"];
+
+  // Получаем параметры из URL
+  const params = new URLSearchParams(window.location.search);
+  const giveawayId = params.get("g") || "";
+  const answer = params.get("a") || "";
+
+  const pool = [...EMOJIS].sort(() => Math.random() - 0.5).slice(0, 5);
+  if (!pool.includes(answer)) {
+    pool[Math.floor(Math.random() * pool.length)] = answer;
+  }
+  pool.sort(() => Math.random() - 0.5);
+
+  document.getElementById("targetEmoji").textContent = answer;
+
+  const grid = document.getElementById("emojiGrid");
+  pool.forEach(emoji => {
+    const btn = document.createElement("button");
+    btn.className = "emoji-btn";
+    btn.textContent = emoji;
+    btn.onclick = () => handleClick(btn, emoji);
+    grid.appendChild(btn);
+  });
+
+  let attempts = 0;
+
+  function handleClick(btn, emoji) {
+    if (emoji === answer) {
+      btn.classList.add("correct");
+      document.getElementById("errorMsg").textContent = "";
+
+      setTimeout(() => {
+        document.getElementById("captchaScreen").classList.add("hide");
+        document.getElementById("successScreen").classList.add("show");
+
+        // Отправляем результат боту
+        tg.sendData(JSON.stringify({ giveaway_id: giveawayId, passed: true }));
+      }, 600);
+    } else {
+      btn.classList.add("wrong");
+      attempts++;
+      document.getElementById("errorMsg").textContent = "Неверно, попробуй ещё раз!";
+      setTimeout(() => btn.classList.remove("wrong"), 400);
+
+      if (attempts >= 5) {
+        document.getElementById("errorMsg").textContent = "Слишком много попыток. Закрой и попробуй снова.";
+        document.querySelectorAll(".emoji-btn").forEach(b => b.disabled = true);
+      }
+    }
+  }
+</script>
+</body>
+</html>
