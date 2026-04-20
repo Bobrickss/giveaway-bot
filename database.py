@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -23,6 +24,12 @@ class Database:
                     title TEXT NOT NULL,
                     description TEXT NOT NULL,
                     winners_count INTEGER NOT NULL DEFAULT 1,
+                    photo_id TEXT DEFAULT '',
+                    button_label TEXT DEFAULT 'Участвовать',
+                    button_color TEXT DEFAULT '🔵 Синий',
+                    tg_channels TEXT DEFAULT '[]',
+                    ig_username TEXT DEFAULT '',
+                    end_time TEXT DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'active',
                     secret_winner_id INTEGER,
                     post_chat_id INTEGER,
@@ -45,21 +52,45 @@ class Database:
                     user_id INTEGER NOT NULL,
                     chosen_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS captcha_sessions (
+                    user_id INTEGER NOT NULL,
+                    giveaway_id TEXT NOT NULL,
+                    answer TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, giveaway_id)
+                );
             """)
 
-    def create_giveaway(self, creator_id: int, title: str, description: str, winners_count: int) -> str:
+    def create_giveaway(self, creator_id, title, description, winners_count,
+                        photo_id="", button_label="Участвовать", button_color="🔵 Синий",
+                        tg_channels=None, ig_username="", end_time="") -> str:
         gid = str(uuid.uuid4())[:8]
+        if tg_channels is None:
+            tg_channels = []
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO giveaways (id, creator_id, title, description, winners_count, created_at) VALUES (?,?,?,?,?,?)",
-                (gid, creator_id, title, description, winners_count, datetime.now().isoformat())
+                """INSERT INTO giveaways
+                   (id, creator_id, title, description, winners_count, photo_id,
+                    button_label, button_color, tg_channels, ig_username, end_time, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (gid, creator_id, title, description, winners_count, photo_id,
+                 button_label, button_color, json.dumps(tg_channels, ensure_ascii=False),
+                 ig_username, end_time, datetime.now().isoformat())
             )
         return gid
 
     def get_giveaway(self, giveaway_id: str) -> Optional[dict]:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM giveaways WHERE id=?", (giveaway_id,)).fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            d = dict(row)
+            try:
+                d["tg_channels"] = json.loads(d.get("tg_channels") or "[]")
+            except Exception:
+                d["tg_channels"] = []
+            return d
 
     def get_user_giveaways(self, user_id: int) -> list:
         with self._conn() as conn:
@@ -67,10 +98,25 @@ class Database:
                 "SELECT * FROM giveaways WHERE creator_id=? AND status='active' ORDER BY created_at DESC",
                 (user_id,)
             ).fetchall()
-            return [dict(r) for r in rows]
+            result = []
+            for r in rows:
+                d = dict(r)
+                try:
+                    d["tg_channels"] = json.loads(d.get("tg_channels") or "[]")
+                except Exception:
+                    d["tg_channels"] = []
+                result.append(d)
+            return result
+
+    def is_participant(self, giveaway_id: str, user_id: int) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM participants WHERE giveaway_id=? AND user_id=?",
+                (giveaway_id, user_id)
+            ).fetchone()
+            return row is not None
 
     def add_participant(self, giveaway_id: str, user_id: int, username: str) -> bool:
-        """Returns True if already participating."""
         try:
             with self._conn() as conn:
                 conn.execute(
@@ -105,16 +151,11 @@ class Database:
 
     def set_secret_winner(self, giveaway_id: str, user_id: int):
         with self._conn() as conn:
-            conn.execute(
-                "UPDATE giveaways SET secret_winner_id=? WHERE id=?",
-                (user_id, giveaway_id)
-            )
+            conn.execute("UPDATE giveaways SET secret_winner_id=? WHERE id=?", (user_id, giveaway_id))
 
     def get_secret_winner(self, giveaway_id: str) -> Optional[int]:
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT secret_winner_id FROM giveaways WHERE id=?", (giveaway_id,)
-            ).fetchone()
+            row = conn.execute("SELECT secret_winner_id FROM giveaways WHERE id=?", (giveaway_id,)).fetchone()
             return row["secret_winner_id"] if row else None
 
     def update_giveaway_message(self, giveaway_id: str, chat_id: int, message_id: int):
@@ -145,6 +186,32 @@ class Database:
     def cancel_giveaway(self, giveaway_id: str):
         with self._conn() as conn:
             conn.execute("UPDATE giveaways SET status='cancelled' WHERE id=?", (giveaway_id,))
+
+    # Капча
+    def set_captcha(self, user_id: int, giveaway_id: str, answer: str):
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO captcha_sessions (user_id, giveaway_id, answer, created_at) VALUES (?,?,?,?)",
+                (user_id, giveaway_id, answer, datetime.now().isoformat())
+            )
+
+    def get_captcha(self, user_id: int, giveaway_id: str) -> Optional[str]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT answer FROM captcha_sessions WHERE user_id=? AND giveaway_id=?",
+                (user_id, giveaway_id)
+            ).fetchone()
+            return row["answer"] if row else None
+
+    def clear_captcha(self, user_id: int, giveaway_id: str):
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM captcha_sessions WHERE user_id=? AND giveaway_id=?",
+                (user_id, giveaway_id)
+            )
+
+
+db = Database()
 
 
 db = Database()
